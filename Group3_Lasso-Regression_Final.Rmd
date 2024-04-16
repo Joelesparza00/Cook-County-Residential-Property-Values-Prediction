@@ -1,0 +1,407 @@
+---
+title: "Team 3 Project"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: simplex
+    number_sections: false
+---
+Total Run Time : 2.5 to 5.5 mins
+```{r global_options, include = FALSE}
+knitr::opts_chunk$set(warning=FALSE, message=FALSE)
+
+```
+
+```{r}
+start.time <- Sys.time()
+```
+
+##Import required packages 
+```{r}
+library(tidyverse)
+library(glmnet)
+```
+
+## Import Historic Property Dataset and Clean Up
+```{r}
+df <- read.csv('historic_property_data.csv')
+str(df)
+head(df)
+```
+Removing columns that are not predictors
+```{r}
+df<- df[,-c(2,5,6,7,8,27,28,33,35,39,41,42,43,44,45,46,47,48,49,50,61)]
+```
+
+Renaming Columns
+```{r}
+colnames(df)<- c("sale_price","Townshp_Code","Neigh_Code","Land_Area_sqft","Apt_Age","Num_Apts","Wall_Mat","Roof_Mat","Room_Count","Bedroom_Count","Basement","Basement_Finish","Cntrl_Heating","Othr_heatng","Cntrl_AC","Fireplace","Attic_Type","Full_Bath","Half_Bath","Desgn_Plan","Cathedral_Ceil","Garage_Size","Garage_Mat","Gar_Attach","Garage_Area","Building_Area_sqft","Usage_Type","Residence_Type","Attic_Finish","Porch","Noise_Indicator","FEMA_Floodplain","Flood_Risk_Fac","Flood_Risk_Direc","Road_Prox_within_100","Road_Prox_within_101_to_300","Elem_School_Dist","High_School_Dist","Tax_rate","Median_Income","Garage_Indicator","ind_armslength")
+str(df)
+```
+### Dealing with columns with high percentage of null values
+Finding out the number of nulls for each column
+```{r}
+#Create function that counts the amount of nulls per column
+count_nulls_per_column <- function(data) {
+  
+  # Use colSums and is.na to count null values in each column
+  null_counts <- colSums(is.na(data))
+  
+  # Create a data frame with column names and corresponding null counts
+  result_table <- data.frame(
+    Column = names(null_counts),
+    Null_Count = null_counts
+  )
+  
+  return(result_table)
+}
+
+#This shows us the null count for each column
+result <- count_nulls_per_column(df)
+print(arrange(result, desc(Null_Count)))
+```
+
+Setting a threshold for nulls and removing columns that comply with the condition
+```{r}
+#Create threshold of 20% to drop columns that have over 20% of nulls.
+threshold <- 0.2
+columns_to_drop <- names(df)[colSums(is.na(df)) / nrow(df) > threshold]
+
+# Drop columns with more than 20% missing values
+df <- df[, -which(names(df) %in% columns_to_drop)]
+str(df)
+```
+
+### Checking the columns that still have NAs
+```{r}
+sapply(df, function(x) sum(is.na(x)))
+```
+Getting rid of observations with null values
+```{r}
+df <- na.omit(df)
+```
+
+### Converting certain attributes of categorical variables
+```{r}
+columns_to_convert<- c("Wall_Mat","Roof_Mat","Basement","Cntrl_Heating","Garage_Size","Residence_Type","Elem_School_Dist", "High_School_Dist", "Townshp_Code", "Neigh_Code", "Basement_Finish", "Othr_heatng", "Cntrl_Heating", "Cntrl_AC", "Attic_Type", "Usage_Type", "Noise_Indicator", "FEMA_Floodplain", "Road_Prox_within_100", "Road_Prox_within_101_to_300", "Garage_Indicator", "ind_armslength", "Garage_Mat", "Garage_Area", "Gar_Attach")
+for (col in columns_to_convert) {
+  df[[col]]<- as.factor(df[[col]])
+}
+str(df)
+```
+### Winsorizing the dataset
+```{r}
+winsorize <- function(x, low_perc = 0.05, high_perc = 0.95) {
+  quantiles <- quantile(x, probs = c(low_perc, high_perc), na.rm = TRUE)
+  x[x < quantiles[1]] <- quantiles[1]
+  x[x > quantiles[2]] <- quantiles[2]
+  x
+}
+
+# winsorize multiple columns
+numeric_vars <- sapply(df, is.numeric)
+df[numeric_vars] <- lapply(df[numeric_vars], winsorize)
+```
+
+### Visualizing the distribution of sale price
+```{r}
+# Display the distribution of sale_price
+ggplot(df, aes(x = sale_price)) +
+  geom_histogram(fill = "lightblue", color = "black", aes(y = ..density..)) +
+  labs(title = "Distribution of Sale Price", x = "Sale Price") +
+  scale_x_continuous(labels = scales::format_format(scientific = FALSE))
+
+# Visualize the distribution with a box plot
+ggplot(df, aes(x = sale_price)) +
+  geom_boxplot(fill = "lightblue", color = "black", outlier.colour = "red") +
+  scale_x_continuous(labels = scales::format_format(scientific = FALSE))
+
+# Display the proportions of each category
+ggplot(df, aes(x = sale_price)) +
+  geom_density(fill = "lightblue", color = "black") +
+  labs(title = "Kernel Density Plot", x = "Sale Price", y = "Density") +
+  scale_x_continuous(labels = scales::format_format(scientific = FALSE)) +
+  scale_y_continuous(labels = scales::format_format(scientific = FALSE))
+```
+
+```{r}
+#Filter out rows that will skew our model as well as columns that have too low variation
+df <- df %>% filter(sale_price < 700000) %>% select(-Flood_Risk_Direc, -FEMA_Floodplain, -Noise_Indicator, -Road_Prox_within_100, -Road_Prox_within_101_to_300)
+```
+
+
+## Convert df into a matrix
+```{r}
+# convert a data frame of predictors to a matrix and create dummy variables for character variables 
+x <- model.matrix(sale_price~.,df)[,-1]
+
+# outcome 
+y <- df$sale_price
+```
+
+## Data Partition
+```{r}
+# set seed 
+set.seed(1)
+
+# row numbers of the training set 
+train.index <- sample(c(1:dim(x)[1]), dim(x)[1]*0.7)
+length(train.index)
+```
+
+```{r}
+# row numbers of the test set 
+test.index <- setdiff(c(1:dim(df)[1]),train.index)
+length(test.index)
+rm(df)
+```
+
+```{r}
+# outcome in the test set 
+y.test <- y[test.index]
+```
+
+## Lasso Regression
+```{r}
+# fit a lasso regression model 
+fit <- glmnet(x[train.index,],y[train.index],alpha=1)
+
+# sequence of lambda values 
+fit$lambda
+```
+
+```{r}
+# dimension of lasso regression coefficients 
+dim(coef(fit))
+```
+
+```{r}
+# plot coefficients on log of lambda values 
+plot(fit, xvar="lambda")
+```
+
+## Using Cross Validation to choose the appropriate Lambda value
+```{r}
+# set seed 
+set.seed(1)
+
+# 5-fold cross validation 
+cv.fit <- cv.glmnet(x[train.index,],y[train.index],alpha=1, type.measure="mse", nfold=5)
+
+# plot the cross-validated MSE for each lambda 
+plot(cv.fit)
+```
+
+```{r}
+# lambda that corresponds to the lowest cross-validated MSE 
+lambda.best <- cv.fit$lambda.min
+lambda.best
+```
+
+## Model with the Best Lamdbda
+```{r}
+# lasso regression coefficients  
+coef.lambda.best <- predict(cv.fit,s=lambda.best,type="coefficients")
+coef.lambda.best
+```
+
+```{r}
+# non-zero coefficients 
+coef.lambda.best[coef.lambda.best!=0] 
+```
+
+```{r}
+# make predictions for records in the test set 
+pred.lambda.best <- predict(fit,s=lambda.best,newx=x[test.index,])
+head(pred.lambda.best)
+```
+
+```{r}
+# MSE in the test set
+MSE <- mean((y.test-pred.lambda.best)^2)
+MSE
+```
+
+```{r}
+# Differences between actual and predicted values
+differences <- y.test - pred.lambda.best
+
+# Create a data frame
+data <- data.frame(differences)
+
+# Plotting a histogram with ggplot2
+ggplot(data, aes(x = differences)) +
+  geom_histogram(binwidth = 25000, fill = "lightblue", color = "black") +
+  labs(title = "Distribution of Differences",
+       x = "Actual - Predicted",
+       y = "Frequency") +
+  theme_classic() +
+  scale_x_continuous(breaks = seq(-250000, 250000, by = 25000)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Summary of differences
+summary(differences)
+```
+
+```{r}
+# Create a vector of absolute differences
+absolute_differences_data <- abs(differences)
+
+# Define the absolute value ranges with 20,000 intervals
+value_ranges_data <- c("0-25k", "25-50k", "50-75k", "75-100k", "100-125k", "125-150k","150k+")
+
+# Define the corresponding bins with 20,000 intervals
+bins_data <- c(0, 25000, 50000, 75000, 100000, 125000, 150000, Inf)
+
+# Cut the absolute differences into bins
+difference_bins_data <- cut(absolute_differences_data, breaks = bins_data, labels = value_ranges_data, right = FALSE)
+
+# Convert value_ranges_data to a factor with desired levels
+value_ranges_data <- factor(value_ranges_data, levels = value_ranges_data)
+
+# Calculate the percentage for each bin
+counts_data <- table(difference_bins_data)
+percentage_counts_data <- counts_data / sum(counts_data) * 100
+
+# Create a data frame
+data <- data.frame(value_ranges_data, percentage_counts_data)
+
+# Bar plot with ggplot2
+ggplot(data, aes(x = value_ranges_data, y = percentage_counts_data)) +
+  geom_bar(stat = "identity", fill = "lightblue", color = "black") +
+  labs(title = "Distribution of Absolute Differences",
+       x = "Absolute Difference Ranges",
+       y = "Percentage") +
+  ylim(0, 35) +  # Adjust y-axis limits
+  theme_classic() +  
+  geom_text(aes(label = paste0(round(percentage_counts_data, 2), "%")), vjust = -0.5)
+```
+
+```{r}
+
+df.test <- read.csv('predict_property_data.csv')
+str(df.test)
+head(df.test)
+```
+Removing columns that are not predictors
+```{r}
+df.test<- df.test[,-c(2,5,6,7,8,27,28,33,35,39,41,42,43,44,45,46,47,48,49,50,61)]
+
+```
+
+Renaming Columns
+```{r}
+colnames(df.test)<- c("pid","Townshp_Code","Neigh_Code","Land_Area_sqft","Apt_Age","Num_Apts","Wall_Mat","Roof_Mat","Room_Count","Bedroom_Count","Basement","Basement_Finish","Cntrl_Heating","Othr_heatng","Cntrl_AC","Fireplace","Attic_Type","Full_Bath","Half_Bath","Desgn_Plan","Cathedral_Ceil","Garage_Size","Garage_Mat","Gar_Attach","Garage_Area","Building_Area_sqft","Usage_Type","Residence_Type","Attic_Finish","Porch","Noise_Indicator","FEMA_Floodplain","Flood_Risk_Fac","Flood_Risk_Direc","Road_Prox_within_100","Road_Prox_within_101_to_300","Elem_School_Dist","High_School_Dist","Tax_rate","Median_Income","Garage_Indicator","ind_armslength")
+str(df.test)
+```
+### Checking the columns that still have NAs
+```{r}
+sapply(df.test, function(x) sum(is.na(x)))
+
+```
+
+
+### Checking the columns that still have NAs
+```{r}
+# Install and load the mice package if not already installed
+if (!requireNamespace("mice", quietly = TRUE)) {
+  install.packages("mice")
+}
+library(mice)
+
+# Impute missing values using mice with "pmm" method
+mice_object <- suppressMessages(mice(df.test, method = "pmm"))
+
+# Complete the imputation
+df.test_imputed <- suppressMessages(complete(mice_object))
+
+# Check for remaining missing values
+sapply(df.test_imputed, function(x) sum(is.na(x)))
+
+str(df.test_imputed)
+
+```
+## Change to categorical variables
+```{r}
+columns_to_convert<- c("Wall_Mat","Roof_Mat","Basement","Cntrl_Heating","Garage_Size","Residence_Type","Elem_School_Dist", "High_School_Dist", "Townshp_Code", "Neigh_Code", "Basement_Finish", "Othr_heatng", "Cntrl_Heating", "Cntrl_AC", "Attic_Type", "Usage_Type", "Noise_Indicator", "FEMA_Floodplain", "Road_Prox_within_100", "Road_Prox_within_101_to_300", "Garage_Indicator", "ind_armslength", "Garage_Mat", "Garage_Area", "Gar_Attach")
+for (col in columns_to_convert) {
+  df.test_imputed[[col]]<- as.factor(df.test_imputed[[col]])
+}
+str(df.test_imputed)
+
+```
+```{r}
+
+# select function to remove unecessary columns
+df.test_imputed <- df.test_imputed %>% select(-Num_Apts, -Porch, -Attic_Finish, -Cathedral_Ceil, -Desgn_Plan, -Flood_Risk_Direc, -FEMA_Floodplain, -Noise_Indicator, -Road_Prox_within_100, -Road_Prox_within_101_to_300)
+
+# Check the structure of the data frame
+str(df.test_imputed)
+
+```
+
+```{r}
+# Convert predicted property data into a matrix
+df.test_imputed <- model.matrix(pid~.,df.test_imputed)[,-1]
+dim(df.test_imputed)
+```
+
+```{r}
+# Assuming colnames(x) and colnames(df.test_imputed) represent the column names of x and df.test_imputed
+all_columns <- colnames(x)
+
+# Identify missing columns
+missing_columns <- setdiff(all_columns, colnames(df.test_imputed))
+
+# Add missing columns to df with NA values
+df.test_imputed <- cbind(df.test_imputed, matrix(0, nrow = nrow(df.test_imputed), ncol = length(missing_columns), dimnames = list(NULL, missing_columns)))
+
+# Reorder columns to match the order in x
+df.test_imputed <- df.test_imputed[, all_columns]
+dim(df.test_imputed)
+```
+
+```{r}
+# Convert df.test_imputed into a matrix
+df.test_imputed <- as.matrix(df.test_imputed)
+
+# Predict housing prices from prediction dataset
+predictions <- predict(fit, s=lambda.best, newx = df.test_imputed)
+head(predictions)
+
+```
+
+```{r}
+# Extract pid from the new data
+pid <- df.test$pid
+
+# Create a data frame with pid and predicted assessed_value
+result_df <- data.frame(pid = pid, assessed_value = predictions)
+
+
+# View critical values of distribution
+summary(result_df$s1)
+
+# Visualize distributions of predictions
+ggplot(result_df, aes(s1)) +
+  geom_histogram(color = "black", fill = "lightblue")
+
+ggplot(result_df, aes(s1)) +
+  geom_boxplot(color = "black", fill = "lightblue")
+
+
+#Rename column
+colnames(result_df)[2] ="assessed_value"
+
+# Write the result to a CSV file
+write.csv(result_df, file = "assessed_value.csv", row.names = FALSE)
+```
+
+```{r}
+end.time <- Sys.time()
+time.taken <- round(end.time - start.time,2)
+time.taken
+```
+

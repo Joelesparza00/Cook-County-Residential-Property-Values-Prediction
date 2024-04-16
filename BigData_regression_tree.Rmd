@@ -1,0 +1,186 @@
+---
+title: "Team 3 Project"
+output:
+  html_document:
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+    theme: simplex
+    number_sections: no
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+---
+
+```{r global_options, include = FALSE}
+knitr::opts_chunk$set(warning=FALSE, message=FALSE)
+```
+
+
+```{r}
+library(rpart)
+install.packages("rpart.plot")
+library(rpart.plot)
+library(dplyr)
+```
+Importing the .csv file
+```{r}
+df<- read.csv("C:/Users/12173/Downloads/historic_property_data.csv")
+str(df)
+head(df)
+```
+Removing columns that are not predictors
+```{r}
+df<- df[,-c(2,5,6,7,8,27,28,33,35,39,41,42,43,44,45,46,47,48,49,50,61)]
+```
+
+Renaming Columns
+```{r}
+colnames(df)<- c("sale_price","Townshp_Code","Neigh_Code","Land_Area_sqft","Apt_Age","Num_Apts","Wall_Mat","Roof_Mat","Room_Count","Bedroom_Count","Basement","Basement_Finish","Cntrl_Heating","Othr_heatng","Cntrl_AC","Fireplace","Attic_Type","Full_Bath","Half_Bath","Desgn_Plan","Cathedral_Ceil","Garage_Size","Garage_Mat","Gar_Attach","Garage_Area","Building_Area_sqft","Usage_Type","Residence_Type","Attic_Finish","Porch","Noise_Indicator","FEMA_Floodplain","Flood_Risk_Fac","Flood_Risk_Direc","Road_Prox_within_100","Road_Prox_within_101_to_300","Elem_School_Dist","High_School_Dist","Tax_rate","Median_Income","Garage_Indicator","ind_armslength")
+str(df)
+```
+
+Finding out the number of nulls for each column
+```{r}
+#Create function that counts the amount of nulls per column
+count_nulls_per_column <- function(data) {
+  
+  # Use colSums and is.na to count null values in each column
+  null_counts <- colSums(is.na(data))
+  
+  # Create a data frame with column names and corresponding null counts
+  result_table <- data.frame(
+    Column = names(null_counts),
+    Null_Count = null_counts
+  )
+  
+  return(result_table)
+}
+
+#This shows us the null count for each column
+result <- count_nulls_per_column(df)
+print(arrange(result, desc(Null_Count)))
+```
+Setting a threshold for nulls and removing columns that comply with the condition
+```{r}
+limit<- 0.1*nrow(df)
+to_drop<- sapply(df,function(x) sum(is.na(x))>limit)
+df<- df[,!to_drop]
+str(df)
+```
+
+Removing the unique values
+```{r}
+min_unique_values <- 5 # Minimum number of unique values
+max_unique_pct <- 0.95 # Maximum percentage of unique values
+
+# Function to check if a variable meets the criteria
+has_few <- function(x) length(unique(x)) < min_unique_values
+has_many <- function(x) length(unique(x)) > (max_unique_pct * length(x))
+
+# Use sapply to find columns that don't meet the criteria
+few_unique <- sapply(df, has_few)
+many_unique <- sapply(df, has_many)
+
+# Combine the criteria
+to_drop1 <- few_unique | many_unique
+
+# Drop these columns from the dataframe
+df <- df[, !to_drop1]
+dim(df)
+```
+Checking the columns that still have NAs
+```{r}
+sapply(df, function(x) sum(is.na(x)))
+```
+dropping nulls
+```{r}
+df <- na.omit(df)
+sapply(df, function(x) sum(is.na(x)))
+
+
+```
+
+
+
+ Converting certain attributes of categorical variables
+```{r}
+columns_to_convert<- c("Wall_Mat","Roof_Mat","Basement","Cntrl_Heating","Garage_Size","Residence_Type","Flood_Risk_Fac")
+for (col in columns_to_convert) {
+  df[[col]]<- as.factor(df[[col]])
+}
+str(df)
+```
+## Winsorizing the dataset
+```{r}
+winsorize <- function(x, low_perc = 0.05, high_perc = 0.95) {
+  quantiles <- quantile(x, probs = c(low_perc, high_perc), na.rm = TRUE)
+  x[x < quantiles[1]] <- quantiles[1]
+  x[x > quantiles[2]] <- quantiles[2]
+  x
+}
+
+# winsorize multiple columns
+numeric_vars <- sapply(df, is.numeric)
+df[numeric_vars] <- lapply(df[numeric_vars], winsorize)
+str(df)
+```
+
+
+
+Data partion
+```{r}
+# set the seed 
+set.seed(1)
+# row numbers of the training set
+n_rows <- dim(df)[1]
+n_train <- round(0.6 * n_rows)
+train.index <- sample(1:n_rows, n_train)
+
+# training set
+train.df <- df[train.index, ]
+
+# test set 
+test.df <- df[-train.index, ]
+```
+
+
+Fit a regression tree
+```{r}
+# regression tree with cp = 0.01
+rt <- rpart(sale_price ~ ., data = train.df, method = "anova", cp = 0.01)
+
+
+# plot the tree
+
+prp(rt, type = 1, extra = 1, cex = 0.8)
+
+
+
+```
+
+Predict 
+```{r}
+rt.pred <- predict(rt, newdata = test.df, type = "vector")
+
+# first six values 
+head(rt.pred)
+```
+MSE
+```{r}
+mse_rt <- mean((test.df$sale_price - rt.pred)^2)
+mse_rt
+```
+Pruned
+```{r}
+# Prune the tree with a specific complexity parameter (cp)
+pruned_rt <- prune(rt, cp = 0.0001)
+
+# Evaluate pruned tree on test data
+pruned_pred <- predict(pruned_rt, newdata = test.df, type = "vector")
+pruned_mse <- mean((test.df$sale_price - pruned_pred)^2)
+pruned_mse
+
+
+```
+
